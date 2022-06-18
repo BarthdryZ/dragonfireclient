@@ -43,7 +43,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "gettext.h"
 #include "gui/cheatMenu.h"
 #include "gui/guiChatConsole.h"
-#include "gui/guiConfirmRegistration.h"
 #include "gui/guiFormSpecMenu.h"
 #include "gui/guiKeyChangeMenu.h"
 #include "gui/guiPasswordChange.h"
@@ -86,7 +85,7 @@ struct Jitter {
 };
 
 struct RunStats {
-	u32 drawtime;
+	u64 drawtime; // (us)
 
 	Jitter dtime_jitter, busy_time_jitter;
 };
@@ -584,7 +583,7 @@ public:
 	}
 };
 
-#ifdef __ANDROID__
+#ifdef HAVE_TOUCHSCREENGUI
 #define SIZE_TAG "size[11,5.5]"
 #else
 #define SIZE_TAG "size[11,5.5,true]" // Fixed size on desktop
@@ -596,7 +595,16 @@ public:
 const float object_hit_delay = 0.2;
 
 struct FpsControl {
-	u32 last_time, busy_time, sleep_time;
+	FpsControl() : last_time(0), busy_time(0), sleep_time(0) {}
+
+	void reset();
+
+	void limit(IrrlichtDevice *device, f32 *dtime);
+
+	u32 getBusyMs() const { return busy_time / 1000; }
+
+	// all values in microseconds (us)
+	u64 last_time, busy_time, sleep_time;
 };
 
 
@@ -726,9 +734,9 @@ public:
 	void updatePlayerControl(const CameraOrientation &cam);
 	void step(f32 *dtime);
 	void processClientEvents(CameraOrientation *cam);
-	void updateCamera(u32 busy_time, f32 dtime);
+	void updateCamera(f32 dtime);
 	void updateSound(f32 dtime);
-	void processPlayerInteraction(f32 dtime, bool show_hud, bool show_debug);
+	void processPlayerInteraction(f32 dtime, bool show_hud);
 	/*!
 	 * Returns the object or node the player is pointing at.
 	 * Also updates the selected thing in the Hud.
@@ -757,8 +765,6 @@ public:
 	void updateShadows();
 
 	// Misc
-	void limitFps(FpsControl *fps_timings, f32 *dtime);
-
 	void showOverlayMessage(const char *msg, float dtime, int percent,
 			bool draw_clouds = true);
 
@@ -807,7 +813,7 @@ public:
 		CameraOrientation *cam);
 	void handleClientEvent_CloudParams(ClientEvent *event, CameraOrientation *cam);
 
-	void updateChat(f32 dtime, const v2u32 &screensize);
+	void updateChat(f32 dtime);
 
 	bool nodePlacement(const ItemDefinition &selected_def, const ItemStack &selected_item,
 		const v3s16 &nodepos, const v3s16 &neighbourpos, const PointedThing &pointed,
@@ -904,12 +910,17 @@ public:
 
 	bool m_does_lost_focus_pause_game = false;
 
-	CameraOrientation cam_view_target  = { 0 };
-	CameraOrientation cam_view  = { 0 };
+	CameraOrientation cam_view_target = {}; // added by dragonfireclient
+	CameraOrientation cam_view  = {};       // added by dragonfireclient
 
+#if IRRLICHT_VERSION_MT_REVISION < 5
 	int m_reset_HW_buffer_counter = 0;
-#ifdef __ANDROID__
+#endif
+
+#ifdef HAVE_TOUCHSCREENGUI
 	bool m_cache_hold_aux1;
+#endif
+#ifdef __ANDROID__
 	bool m_android_chat_open;
 #endif
 };

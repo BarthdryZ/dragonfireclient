@@ -139,6 +139,14 @@ int ModApiMainMenu::l_start(lua_State *L)
 		data->password = getTextData(L,"password");
 		data->address  = getTextData(L,"address");
 		data->port     = getTextData(L,"port");
+
+		const auto val = getTextData(L, "allow_login_or_register");
+		if (val == "login")
+			data->allow_login_or_register = ELoginRegister::Login;
+		else if (val == "register")
+			data->allow_login_or_register = ELoginRegister::Register;
+		else
+			data->allow_login_or_register = ELoginRegister::Any;
 	}
 	data->serverdescription = getTextData(L,"serverdescription");
 	data->servername        = getTextData(L,"servername");
@@ -304,7 +312,11 @@ int ModApiMainMenu::l_get_games(lua_State *L)
 		lua_settable(L,    top_lvl2);
 
 		lua_pushstring(L,  "name");
-		lua_pushstring(L,  game.name.c_str());
+		lua_pushstring(L,  game.title.c_str());
+		lua_settable(L,    top_lvl2);
+
+		lua_pushstring(L,  "title");
+		lua_pushstring(L,  game.title.c_str());
 		lua_settable(L,    top_lvl2);
 
 		lua_pushstring(L,  "author");
@@ -323,9 +335,9 @@ int ModApiMainMenu::l_get_games(lua_State *L)
 		lua_newtable(L);
 		int table2 = lua_gettop(L);
 		int internal_index = 1;
-		for (const std::string &addon_mods_path : game.addon_mods_paths) {
+		for (const auto &addon_mods_path : game.addon_mods_paths) {
 			lua_pushnumber(L, internal_index);
-			lua_pushstring(L, addon_mods_path.c_str());
+			lua_pushstring(L, addon_mods_path.second.c_str());
 			lua_settable(L,   table2);
 			internal_index++;
 		}
@@ -355,6 +367,11 @@ int ModApiMainMenu::l_get_content_info(lua_State *L)
 
 	lua_pushstring(L, spec.author.c_str());
 	lua_setfield(L, -2, "author");
+
+	if (!spec.title.empty()) {
+		lua_pushstring(L, spec.title.c_str());
+		lua_setfield(L, -2, "title");
+	}
 
 	lua_pushinteger(L, spec.release);
 	lua_setfield(L, -2, "release");
@@ -414,25 +431,53 @@ int ModApiMainMenu::l_create_world(lua_State *L)
 	const char *name	= luaL_checkstring(L, 1);
 	int gameidx			= luaL_checkinteger(L,2) -1;
 
+	StringMap use_settings;
+	luaL_checktype(L, 3, LUA_TTABLE);
+	lua_pushnil(L);
+	while (lua_next(L, 3) != 0) {
+		// key at index -2 and value at index -1
+		use_settings[luaL_checkstring(L, -2)] = luaL_checkstring(L, -1);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+
 	std::string path = porting::path_user + DIR_DELIM
 			"worlds" + DIR_DELIM
 			+ sanitizeDirName(name, "world_");
 
 	std::vector<SubgameSpec> games = getAvailableGames();
-
-	if ((gameidx >= 0) &&
-			(gameidx < (int) games.size())) {
-
-		// Create world if it doesn't exist
-		try {
-			loadGameConfAndInitWorld(path, name, games[gameidx], true);
-			lua_pushnil(L);
-		} catch (const BaseException &e) {
-			lua_pushstring(L, (std::string("Failed to initialize world: ") + e.what()).c_str());
-		}
-	} else {
+	if (gameidx < 0 || gameidx >= (int) games.size()) {
 		lua_pushstring(L, "Invalid game index");
+		return 1;
 	}
+
+	// Set the settings for world creation
+	// this is a bad hack but the best we have right now..
+	StringMap backup;
+	for (auto it : use_settings) {
+		if (g_settings->existsLocal(it.first))
+			backup[it.first] = g_settings->get(it.first);
+		g_settings->set(it.first, it.second);
+	}
+
+	// Create world if it doesn't exist
+	try {
+		loadGameConfAndInitWorld(path, name, games[gameidx], true);
+		lua_pushnil(L);
+	} catch (const BaseException &e) {
+		auto err = std::string("Failed to initialize world: ") + e.what();
+		lua_pushstring(L, err.c_str());
+	}
+
+	// Restore previous settings
+	for (auto it : use_settings) {
+		auto it2 = backup.find(it.first);
+		if (it2 == backup.end())
+			g_settings->remove(it.first); // wasn't set before
+		else
+			g_settings->set(it.first, it2->second); // was set before
+	}
+
 	return 1;
 }
 
@@ -503,6 +548,21 @@ int ModApiMainMenu::l_get_modpath(lua_State *L)
 }
 
 /******************************************************************************/
+int ModApiMainMenu::l_get_modpaths(lua_State *L)
+{
+	lua_newtable(L);
+
+	ModApiMainMenu::l_get_modpath(L);
+	lua_setfield(L, -2, "mods");
+
+	for (const std::string &component : getEnvModPaths()) {
+		lua_pushstring(L, component.c_str());
+		lua_setfield(L, -2, fs::AbsolutePath(component).c_str());
+	}
+	return 1;
+}
+
+/******************************************************************************/
 int ModApiMainMenu::l_get_clientmodpath(lua_State *L)
 {
 	std::string modpath = fs::RemoveRelativePathComponents(
@@ -548,7 +608,10 @@ int ModApiMainMenu::l_get_cache_path(lua_State *L)
 /******************************************************************************/
 int ModApiMainMenu::l_get_temp_path(lua_State *L)
 {
-	lua_pushstring(L, fs::TempPath().c_str());
+	if (lua_isnoneornil(L, 1) || !lua_toboolean(L, 1))
+		lua_pushstring(L, fs::TempPath().c_str());
+	else
+		lua_pushstring(L, fs::CreateTempFile().c_str());
 	return 1;
 }
 
@@ -588,26 +651,24 @@ int ModApiMainMenu::l_copy_dir(lua_State *L)
 	const char *destination	= luaL_checkstring(L, 2);
 
 	bool keep_source = true;
+	if (!lua_isnoneornil(L, 3))
+		keep_source = readParam<bool>(L, 3);
 
-	if ((!lua_isnone(L,3)) &&
-			(!lua_isnil(L,3))) {
-		keep_source = readParam<bool>(L,3);
-	}
+	std::string abs_destination = fs::RemoveRelativePathComponents(destination);
+	std::string abs_source = fs::RemoveRelativePathComponents(source);
 
-	std::string absolute_destination = fs::RemoveRelativePathComponents(destination);
-	std::string absolute_source = fs::RemoveRelativePathComponents(source);
-
-	if ((ModApiMainMenu::mayModifyPath(absolute_destination))) {
-		bool retval = fs::CopyDir(absolute_source,absolute_destination);
-
-		if (retval && (!keep_source)) {
-
-			retval &= fs::RecursiveDelete(absolute_source);
-		}
-		lua_pushboolean(L,retval);
+	if (!ModApiMainMenu::mayModifyPath(abs_destination) ||
+		(!keep_source && !ModApiMainMenu::mayModifyPath(abs_source))) {
+		lua_pushboolean(L, false);
 		return 1;
 	}
-	lua_pushboolean(L,false);
+
+	bool retval;
+	if (keep_source)
+		retval = fs::CopyDir(abs_source, abs_destination);
+	else
+		retval = fs::MoveDir(abs_source, abs_destination);
+	lua_pushboolean(L, retval);
 	return 1;
 }
 
@@ -629,9 +690,9 @@ int ModApiMainMenu::l_extract_zip(lua_State *L)
 	std::string absolute_destination = fs::RemoveRelativePathComponents(destination);
 
 	if (ModApiMainMenu::mayModifyPath(absolute_destination)) {
-		auto rendering_engine = getGuiEngine(L)->m_rendering_engine;
-		fs::CreateAllDirs(absolute_destination);
-		lua_pushboolean(L, fs::extractZipFile(rendering_engine->get_filesystem(), zipfile, destination));
+		auto fs = RenderingEngine::get_raw_device()->getFileSystem();
+		bool ok = fs::extractZipFile(fs, zipfile, destination);
+		lua_pushboolean(L, ok);
 		return 1;
 	}
 
@@ -759,8 +820,9 @@ int ModApiMainMenu::l_get_video_drivers(lua_State *L)
 /******************************************************************************/
 int ModApiMainMenu::l_gettext(lua_State *L)
 {
-	std::string text = strgettext(std::string(luaL_checkstring(L, 1)));
-	lua_pushstring(L, text.c_str());
+	const char *srctext = luaL_checkstring(L, 1);
+	const char *text = *srctext ? gettext(srctext) : "";
+	lua_pushstring(L, text);
 
 	return 1;
 }
@@ -819,6 +881,19 @@ int ModApiMainMenu::l_open_dir(lua_State *L)
 }
 
 /******************************************************************************/
+int ModApiMainMenu::l_share_file(lua_State *L)
+{
+#ifdef __ANDROID__
+	std::string path = luaL_checkstring(L, 1);
+	porting::shareFileAndroid(path);
+	lua_pushboolean(L, true);
+#else
+	lua_pushboolean(L, false);
+#endif
+	return 1;
+}
+
+/******************************************************************************/
 int ModApiMainMenu::l_do_async_callback(lua_State *L)
 {
 	MainMenuScripting *script = getScriptApi<MainMenuScripting>(L);
@@ -860,6 +935,7 @@ void ModApiMainMenu::Initialize(lua_State *L, int top)
 	API_FCT(get_mapgen_names);
 	API_FCT(get_user_path);
 	API_FCT(get_modpath);
+	API_FCT(get_modpaths);
 	API_FCT(get_clientmodpath);
 	API_FCT(get_gamepath);
 	API_FCT(get_texturepath);
@@ -882,6 +958,7 @@ void ModApiMainMenu::Initialize(lua_State *L, int top)
 	API_FCT(get_max_supp_proto);
 	API_FCT(open_url);
 	API_FCT(open_dir);
+	API_FCT(share_file);
 	API_FCT(do_async_callback);
 }
 
@@ -893,6 +970,7 @@ void ModApiMainMenu::InitializeAsync(lua_State *L, int top)
 	API_FCT(get_mapgen_names);
 	API_FCT(get_user_path);
 	API_FCT(get_modpath);
+	API_FCT(get_modpaths);
 	API_FCT(get_clientmodpath);
 	API_FCT(get_gamepath);
 	API_FCT(get_texturepath);
@@ -903,10 +981,10 @@ void ModApiMainMenu::InitializeAsync(lua_State *L, int top)
 	API_FCT(delete_dir);
 	API_FCT(copy_dir);
 	API_FCT(is_dir);
-	//API_FCT(extract_zip); //TODO remove dependency to GuiEngine
+	API_FCT(extract_zip);
 	API_FCT(may_modify_path);
 	API_FCT(download_file);
 	API_FCT(get_min_supp_proto);
 	API_FCT(get_max_supp_proto);
-	//API_FCT(gettext); (gettext lib isn't threadsafe)
+	API_FCT(gettext);
 }

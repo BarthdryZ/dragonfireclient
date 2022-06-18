@@ -33,6 +33,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "nameidmapping.h"
 #include "util/numeric.h"
 #include "util/serialize.h"
+#include "util/string.h"
 #include "exceptions.h"
 #include "debug.h"
 #include "gamedef.h"
@@ -55,20 +56,7 @@ void NodeBox::reset()
 	wall_bottom = aabb3f(-BS/2, -BS/2, -BS/2, BS/2, -BS/2+BS/16., BS/2);
 	wall_side = aabb3f(-BS/2, -BS/2, -BS/2, -BS/2+BS/16., BS/2, BS/2);
 	// no default for other parts
-	connect_top.clear();
-	connect_bottom.clear();
-	connect_front.clear();
-	connect_left.clear();
-	connect_back.clear();
-	connect_right.clear();
-	disconnected_top.clear();
-	disconnected_bottom.clear();
-	disconnected_front.clear();
-	disconnected_left.clear();
-	disconnected_back.clear();
-	disconnected_right.clear();
-	disconnected.clear();
-	disconnected_sides.clear();
+	connected.reset();
 }
 
 void NodeBox::serialize(std::ostream &os, u16 protocol_version) const
@@ -98,7 +86,7 @@ void NodeBox::serialize(std::ostream &os, u16 protocol_version) const
 		writeV3F32(os, wall_side.MinEdge);
 		writeV3F32(os, wall_side.MaxEdge);
 		break;
-	case NODEBOX_CONNECTED:
+	case NODEBOX_CONNECTED: {
 		writeU8(os, type);
 
 #define WRITEBOX(box) \
@@ -108,22 +96,25 @@ void NodeBox::serialize(std::ostream &os, u16 protocol_version) const
 			writeV3F32(os, i.MaxEdge); \
 		};
 
+		const auto &c = getConnected();
+
 		WRITEBOX(fixed);
-		WRITEBOX(connect_top);
-		WRITEBOX(connect_bottom);
-		WRITEBOX(connect_front);
-		WRITEBOX(connect_left);
-		WRITEBOX(connect_back);
-		WRITEBOX(connect_right);
-		WRITEBOX(disconnected_top);
-		WRITEBOX(disconnected_bottom);
-		WRITEBOX(disconnected_front);
-		WRITEBOX(disconnected_left);
-		WRITEBOX(disconnected_back);
-		WRITEBOX(disconnected_right);
-		WRITEBOX(disconnected);
-		WRITEBOX(disconnected_sides);
+		WRITEBOX(c.connect_top);
+		WRITEBOX(c.connect_bottom);
+		WRITEBOX(c.connect_front);
+		WRITEBOX(c.connect_left);
+		WRITEBOX(c.connect_back);
+		WRITEBOX(c.connect_right);
+		WRITEBOX(c.disconnected_top);
+		WRITEBOX(c.disconnected_bottom);
+		WRITEBOX(c.disconnected_front);
+		WRITEBOX(c.disconnected_left);
+		WRITEBOX(c.disconnected_back);
+		WRITEBOX(c.disconnected_right);
+		WRITEBOX(c.disconnected);
+		WRITEBOX(c.disconnected_sides);
 		break;
+	}
 	default:
 		writeU8(os, type);
 		break;
@@ -172,21 +163,23 @@ void NodeBox::deSerialize(std::istream &is)
 
 		u16 count;
 
+		auto &c = getConnected();
+
 		READBOXES(fixed);
-		READBOXES(connect_top);
-		READBOXES(connect_bottom);
-		READBOXES(connect_front);
-		READBOXES(connect_left);
-		READBOXES(connect_back);
-		READBOXES(connect_right);
-		READBOXES(disconnected_top);
-		READBOXES(disconnected_bottom);
-		READBOXES(disconnected_front);
-		READBOXES(disconnected_left);
-		READBOXES(disconnected_back);
-		READBOXES(disconnected_right);
-		READBOXES(disconnected);
-		READBOXES(disconnected_sides);
+		READBOXES(c.connect_top);
+		READBOXES(c.connect_bottom);
+		READBOXES(c.connect_front);
+		READBOXES(c.connect_left);
+		READBOXES(c.connect_back);
+		READBOXES(c.connect_right);
+		READBOXES(c.disconnected_top);
+		READBOXES(c.disconnected_bottom);
+		READBOXES(c.disconnected_front);
+		READBOXES(c.disconnected_left);
+		READBOXES(c.disconnected_back);
+		READBOXES(c.disconnected_right);
+		READBOXES(c.disconnected);
+		READBOXES(c.disconnected_sides);
 	}
 }
 
@@ -207,7 +200,28 @@ void TileDef::serialize(std::ostream &os, u16 protocol_version) const
 	u8 version = 6;
 	writeU8(os, version);
 
-	os << serializeString16(name);
+	if (protocol_version > 39) {
+		os << serializeString16(name);
+	} else {
+		// Before f018737, TextureSource::getTextureAverageColor did not handle
+		// missing textures. "[png" can be used as base texture, but is not known
+		// on older clients. Hence use "blank.png" to avoid this problem.
+		// To be forward-compatible with future base textures/modifiers,
+		// we apply the same prefix to any texture beginning with [,
+		// except for the ones that are supported on older clients.
+		bool pass_through = true;
+
+		if (!name.empty() && name[0] == '[') {
+			pass_through = str_starts_with(name, "[combine:") ||
+				str_starts_with(name, "[inventorycube{") ||
+				str_starts_with(name, "[lowpart:");
+		}
+
+		if (pass_through)
+			os << serializeString16(name);
+		else
+			os << serializeString16("blank.png^" + name);
+	}
 	animation.serialize(os, version);
 	bool has_scale = scale > 0;
 	u16 flags = 0;
@@ -387,9 +401,9 @@ void ContentFeatures::reset()
 	drowning = 0;
 	light_source = 0;
 	damage_per_second = 0;
-	node_box = NodeBox();
-	selection_box = NodeBox();
-	collision_box = NodeBox();
+	node_box.reset();
+	selection_box.reset();
+	collision_box.reset();
 	waving = 0;
 	legacy_facedir_simple = false;
 	legacy_wallmounted = false;
@@ -403,6 +417,8 @@ void ContentFeatures::reset()
 	palette_name = "";
 	palette = NULL;
 	node_dig_prediction = "air";
+	move_resistance = 0;
+	liquid_move_physics = false;
 }
 
 void ContentFeatures::setAlphaFromLegacy(u8 legacy_alpha)
@@ -440,7 +456,12 @@ void ContentFeatures::serialize(std::ostream &os, u16 protocol_version) const
 	writeU16(os, groups.size());
 	for (const auto &group : groups) {
 		os << serializeString16(group.first);
-		writeS16(os, group.second);
+		if (protocol_version < 41 && group.first.compare("bouncy") == 0) {
+			// Old clients may choke on negative bouncy value
+			writeS16(os, abs(group.second));
+		} else {
+			writeS16(os, group.second);
+		}
 	}
 	writeU8(os, param_type);
 	writeU8(os, param_type_2);
@@ -489,7 +510,16 @@ void ContentFeatures::serialize(std::ostream &os, u16 protocol_version) const
 	writeU32(os, damage_per_second);
 
 	// liquid
-	writeU8(os, liquid_type);
+	LiquidType liquid_type_bc = liquid_type;
+	if (protocol_version <= 39) {
+		// Since commit 7f25823, liquid drawtypes can be used even with LIQUID_NONE
+		// solution: force liquid type accordingly to accepted values
+		if (drawtype == NDT_LIQUID)
+			liquid_type_bc = LIQUID_SOURCE;
+		else if (drawtype == NDT_FLOWINGLIQUID)
+			liquid_type_bc = LIQUID_FLOWING;
+	}
+	writeU8(os, liquid_type_bc);
 	os << serializeString16(liquid_alternative_flowing);
 	os << serializeString16(liquid_alternative_source);
 	writeU8(os, liquid_viscosity);
@@ -512,9 +542,12 @@ void ContentFeatures::serialize(std::ostream &os, u16 protocol_version) const
 	writeU8(os, legacy_facedir_simple);
 	writeU8(os, legacy_wallmounted);
 
+	// new attributes
 	os << serializeString16(node_dig_prediction);
 	writeU8(os, leveled_max);
 	writeU8(os, alpha);
+	writeU8(os, move_resistance);
+	writeU8(os, liquid_move_physics);
 }
 
 void ContentFeatures::deSerialize(std::istream &is)
@@ -584,9 +617,11 @@ void ContentFeatures::deSerialize(std::istream &is)
 
 	// liquid
 	liquid_type = (enum LiquidType) readU8(is);
+	liquid_move_physics = liquid_type != LIQUID_NONE;
 	liquid_alternative_flowing = deSerializeString16(is);
 	liquid_alternative_source = deSerializeString16(is);
 	liquid_viscosity = readU8(is);
+	move_resistance = liquid_viscosity; // set default move_resistance
 	liquid_renewable = readU8(is);
 	liquid_range = readU8(is);
 	drowning = readU8(is);
@@ -618,6 +653,16 @@ void ContentFeatures::deSerialize(std::istream &is)
 		if (is.eof())
 			throw SerializationError("");
 		alpha = static_cast<enum AlphaMode>(tmp);
+
+		tmp = readU8(is);
+		if (is.eof())
+			throw SerializationError("");
+		move_resistance = tmp;
+
+		tmp = readU8(is);
+		if (is.eof())
+			throw SerializationError("");
+		liquid_move_physics = tmp;
 	} catch(SerializationError &e) {};
 }
 
@@ -634,7 +679,7 @@ static void fillTileAttribs(ITextureSource *tsrc, TileLayer *layer,
 	bool has_scale = tiledef.scale > 0;
 	bool use_autoscale = tsettings.autoscale_mode == AUTOSCALE_FORCE ||
 		(tsettings.autoscale_mode == AUTOSCALE_ENABLE && !has_scale);
-	if (use_autoscale) {
+	if (use_autoscale && layer->texture) {
 		auto texture_size = layer->texture->getOriginalSize();
 		float base_size = tsettings.node_texture_size;
 		float size = std::fmin(texture_size.Width, texture_size.Height);
@@ -670,6 +715,7 @@ static void fillTileAttribs(ITextureSource *tsrc, TileLayer *layer,
 	// Animation parameters
 	int frame_count = 1;
 	if (layer->material_flags & MATERIAL_FLAG_ANIMATION) {
+		assert(layer->texture);
 		int frame_length_ms;
 		tiledef.animation.determineParams(layer->texture->getOriginalSize(),
 				&frame_count, &frame_length_ms, NULL);
@@ -680,14 +726,13 @@ static void fillTileAttribs(ITextureSource *tsrc, TileLayer *layer,
 	if (frame_count == 1) {
 		layer->material_flags &= ~MATERIAL_FLAG_ANIMATION;
 	} else {
-		std::ostringstream os(std::ios::binary);
-		if (!layer->frames) {
+		assert(layer->texture);
+		if (!layer->frames)
 			layer->frames = new std::vector<FrameSpec>();
-		}
 		layer->frames->resize(frame_count);
 
+		std::ostringstream os(std::ios::binary);
 		for (int i = 0; i < frame_count; i++) {
-
 			FrameSpec frame;
 
 			os.str("");
@@ -779,8 +824,10 @@ void ContentFeatures::updateTextures(ITextureSource *tsrc, IShaderSource *shdsrc
 	TileDef tdef[6];
 	for (u32 j = 0; j < 6; j++) {
 		tdef[j] = tiledef[j];
-		if (tdef[j].name.empty())
-			tdef[j].name = "unknown_node.png";
+		if (tdef[j].name.empty()) {
+			tdef[j].name = "no_texture.png";
+			tdef[j].backface_culling = false;
+		}
 	}
 	// also the overlay tiles
 	TileDef tdef_overlay[6];
@@ -788,8 +835,9 @@ void ContentFeatures::updateTextures(ITextureSource *tsrc, IShaderSource *shdsrc
 		tdef_overlay[j] = tiledef_overlay[j];
 	// also the special tiles
 	TileDef tdef_spec[6];
-	for (u32 j = 0; j < CF_SPECIAL_COUNT; j++)
+	for (u32 j = 0; j < CF_SPECIAL_COUNT; j++) {
 		tdef_spec[j] = tiledef_special[j];
+	}
 
 	bool is_liquid = false;
 
@@ -853,8 +901,15 @@ void ContentFeatures::updateTextures(ITextureSource *tsrc, IShaderSource *shdsrc
 			solidness = 0;
 			visual_solidness = 1;
 		} else {
-			drawtype = NDT_NORMAL;
-			solidness = 2;
+			if (waving >= 1) {
+				// waving nodes must make faces so there are no gaps
+				drawtype = NDT_ALLFACES;
+				solidness = 0;
+				visual_solidness = 1;
+			} else {
+				drawtype = NDT_NORMAL;
+				solidness = 2;
+			}
 			for (TileDef &td : tdef)
 				td.name += std::string("^[noalpha");
 		}
@@ -1035,6 +1090,8 @@ void NodeDefManager::clear()
 	{
 		ContentFeatures f;
 		f.name = "unknown";
+		for (int t = 0; t < 6; t++)
+			f.tiledef[t].name = "unknown_node.png";
 		// Insert directly into containers
 		content_t c = CONTENT_UNKNOWN;
 		m_content_features[c] = f;
@@ -1236,22 +1293,23 @@ void getNodeBoxUnion(const NodeBox &nodebox, const ContentFeatures &features,
 			break;
 		}
 		case NODEBOX_CONNECTED: {
+			const auto &c = nodebox.getConnected();
 			// Add all possible connected boxes
-			boxVectorUnion(nodebox.fixed,               box_union);
-			boxVectorUnion(nodebox.connect_top,         box_union);
-			boxVectorUnion(nodebox.connect_bottom,      box_union);
-			boxVectorUnion(nodebox.connect_front,       box_union);
-			boxVectorUnion(nodebox.connect_left,        box_union);
-			boxVectorUnion(nodebox.connect_back,        box_union);
-			boxVectorUnion(nodebox.connect_right,       box_union);
-			boxVectorUnion(nodebox.disconnected_top,    box_union);
-			boxVectorUnion(nodebox.disconnected_bottom, box_union);
-			boxVectorUnion(nodebox.disconnected_front,  box_union);
-			boxVectorUnion(nodebox.disconnected_left,   box_union);
-			boxVectorUnion(nodebox.disconnected_back,   box_union);
-			boxVectorUnion(nodebox.disconnected_right,  box_union);
-			boxVectorUnion(nodebox.disconnected,        box_union);
-			boxVectorUnion(nodebox.disconnected_sides,  box_union);
+			boxVectorUnion(nodebox.fixed,         box_union);
+			boxVectorUnion(c.connect_top,         box_union);
+			boxVectorUnion(c.connect_bottom,      box_union);
+			boxVectorUnion(c.connect_front,       box_union);
+			boxVectorUnion(c.connect_left,        box_union);
+			boxVectorUnion(c.connect_back,        box_union);
+			boxVectorUnion(c.connect_right,       box_union);
+			boxVectorUnion(c.disconnected_top,    box_union);
+			boxVectorUnion(c.disconnected_bottom, box_union);
+			boxVectorUnion(c.disconnected_front,  box_union);
+			boxVectorUnion(c.disconnected_left,   box_union);
+			boxVectorUnion(c.disconnected_back,   box_union);
+			boxVectorUnion(c.disconnected_right,  box_union);
+			boxVectorUnion(c.disconnected,        box_union);
+			boxVectorUnion(c.disconnected_sides,  box_union);
 			break;
 		}
 		default: {

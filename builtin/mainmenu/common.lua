@@ -119,31 +119,27 @@ function render_serverlist_row(spec)
 
 	return table.concat(details, ",")
 end
-
---------------------------------------------------------------------------------
-os.tempfolder = function()
-	local temp = core.get_temp_path()
-	return temp .. DIR_DELIM .. "MT_" .. math.random(0, 10000)
-end
-
+---------------------------------------------------------------------------------
 os.tmpname = function()
-	local path = os.tempfolder()
-	io.open(path, "w"):close()
-	return path
+	error('do not use') -- instead use core.get_temp_path()
 end
 --------------------------------------------------------------------------------
 
-function menu_render_worldlist()
-	local retval = ""
+function menu_render_worldlist(show_gameid)
+	local retval = {}
 	local current_worldlist = menudata.worldlist:get_list()
 
+	local row
 	for i, v in ipairs(current_worldlist) do
-		if retval ~= "" then retval = retval .. "," end
-		retval = retval .. core.formspec_escape(v.name) ..
-				" \\[" .. core.formspec_escape(v.gameid) .. "\\]"
+		row = v.name
+		if show_gameid == nil or show_gameid == true then
+			row = row .. " [" .. v.gameid .. "]"
+		end
+		retval[#retval+1] = core.formspec_escape(row)
+
 	end
 
-	return retval
+	return table.concat(retval, ",")
 end
 
 function menu_handle_key_up_down(fields, textlist, settingname)
@@ -245,4 +241,12 @@ function menu_worldmt_legacy(selected)
 			menu_worldmt(selected, mode_name, core.settings:get(mode_name))
 		end
 	end
+end
+
+function confirmation_formspec(message, confirm_id, confirm_label, cancel_id, cancel_label)
+	return "size[10,2.5,true]" ..
+			"label[0.5,0.5;" .. message .. "]" ..
+			"style[" .. confirm_id .. ";bgcolor=red]" ..
+			"button[0.5,1.5;2.5,0.5;" .. confirm_id .. ";" .. confirm_label .. "]" ..
+			"button[7.0,1.5;2.5,0.5;" .. cancel_id .. ";" .. cancel_label .. "]"
 end
